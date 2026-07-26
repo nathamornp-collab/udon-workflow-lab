@@ -1,7 +1,11 @@
 import streamlit as st
 import pandas as pd
 import requests
+import json
+import os
 from datetime import datetime, date
+from google import genai
+from google.genai import types
 
 # ---------------------------------------------------------
 # 1. ตั้งค่าหน้าตาของเว็บแอปพลิเคชัน
@@ -11,8 +15,26 @@ st.set_page_config(
     layout="wide"
 )
 
-# รายการสถานะงานมาตรฐาน
-STATUS_OPTIONS = ["⏳ รอเสนอราคา", "⏳ รอติดตามใบเสนอราคา", "✅ ตกลงทำสัญญา/มัดจำแล้ว", "❌ ลูกค้าปฏิเสธ"]
+# รายการประเภทงานและสถานะงานเริ่มต้น (Default) สำรองไว้
+default_job_types = ["ร้านป้าย/โรงพิมพ์", "งานกระจก/อลูมิเนียม", "งานรับเหมา/ซ่อมบำรุง", "ติดตั้งแอร์/กล้อง", "อื่นๆ"]
+default_status_options = ["⏳ รอเสนอราคา", "⏳ รอติดตามใบเสนอราคา", "✅ ตกลงทำสัญญา/มัดจำแล้ว", "❌ ลูกค้าปฏิเสธ"]
+
+# ดึงรายการจาก st.secrets หากมีอยู่ หรือใช้ค่า Default สำรอง
+try:
+    job_type_list = list(st.secrets.get("JOB_TYPES", default_job_types))
+except Exception:
+    job_type_list = default_job_types
+
+try:
+    STATUS_OPTIONS = list(st.secrets.get("STATUS_OPTIONS", default_status_options))
+except Exception:
+    STATUS_OPTIONS = default_status_options
+
+# ดึง GEMINI_API_KEY จาก st.secrets หรือ os.environ
+try:
+    GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+except Exception:
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # Custom CSS สำหรับ Mobile-friendly UX และ Job Cards
 st.markdown("""
@@ -71,50 +93,127 @@ st.subheader("Udon Workflow Lab — อ่าน & บันทึกข้อ�
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 4. เมนูด้านข้าง: ฟอร์มบันทึกงานใหม่ลง Google Sheets
+# 4. เมนูด้านข้าง: ฟอร์มบันทึกงานใหม่ลง Google Sheets (รองรับ AI Agent)
 # ---------------------------------------------------------
-st.sidebar.header("➕ บันทึกลูกค้า/งานใหม่จาก LINE")
-with st.sidebar.form("new_job_form", clear_on_submit=True):
-    customer_name = st.text_input("ชื่อลูกค้า / ชื่อร้าน")
-    phone = st.text_input("เบอร์โทรศัพท์ / LINE ID")
-    job_type = st.selectbox("ประเภทงาน", ["ร้านป้าย/โรงพิมพ์", "งานกระจก/อลูมิเนียม", "งานรับเหมา/ซ่อมบำรุง", "ติดตั้งแอร์/กล้อง", "อื่นๆ"])
-    price = st.number_input("ประเมินมูลค่างาน (บาท)", min_value=0, step=1000, value=5000)
-    status = st.selectbox("สถานะปัจจุบัน", STATUS_OPTIONS)
-    follow_date = st.date_input("วันที่ต้องติดตามผลครั้งถัดไป", value=date.today())
+st.sidebar.header("➕ บันทึกลูกค้า/งานใหม่")
+
+tab_manual, tab_ai = st.sidebar.tabs(["📝 กรอกเอง", "🤖 AI Agent สกัดแชท"])
+
+with tab_manual:
+    with st.form("new_job_form", clear_on_submit=True):
+        customer_name = st.text_input("ชื่อลูกค้า / ชื่อร้าน")
+        phone = st.text_input("เบอร์โทรศัพท์ / LINE ID")
+        job_type = st.selectbox("ประเภทงาน", job_type_list)
+        price = st.number_input("ประเมินมูลค่างาน (บาท)", min_value=0, step=1000, value=5000)
+        status = st.selectbox("สถานะปัจจุบัน", STATUS_OPTIONS)
+        follow_date = st.date_input("วันที่ต้องติดตามผลครั้งถัดไป", value=date.today())
+        
+        submitted = st.form_submit_button("💾 บันทึกข้อมูลลง Google Sheets")
+        
+        if submitted:
+            if customer_name.strip() == "":
+                st.sidebar.error("กรุณากรอกชื่อลูกค้าครับ!")
+            else:
+                # สร้างรหัสงานให้อัตโนมัติ (เช่น JOB-001, JOB-002)
+                new_id = f"JOB-{len(df) + 1:03d}"
+                
+                # เตรียมแพ็กเกจข้อมูลส่งหา Webhook
+                payload = {
+                    "action": "create",
+                    "job_id": new_id,
+                    "customer_name": customer_name,
+                    "phone": phone,
+                    "job_type": job_type,
+                    "price": price,
+                    "status": status,
+                    "follow_date": follow_date.strftime("%Y-%m-%d")
+                }
+                
+                # ยิงข้อมูลไปหา Google Apps Script
+                with st.spinner("กำลังบันทึกลง Google Sheets..."):
+                    try:
+                        response = requests.post(WEBHOOK_URL, json=payload, timeout=10)
+                        if response.status_code == 200:
+                            st.sidebar.success(f"บันทึกรหัส {new_id} เรียบร้อยแล้ว!")
+                            st.cache_data.clear()  # ล้างแคชเพื่อให้ตารางอัปเดตข้อมูลใหม่ทันที
+                            st.rerun()
+                        else:
+                            st.sidebar.error("เกิดข้อผิดพลาดในการบันทึก กรุณาเช็กการตั้งค่า Webhook")
+                    except Exception as ex:
+                        st.sidebar.error(f"การเชื่อมต่อผิดพลาด: {ex}")
+
+with tab_ai:
+    st.write("วางข้อความแชทจาก LINE/Facebook ให้ AI สกัดข้อมูลและบันทึกอัตโนมัติ")
+    chat_input = st.text_area("วางข้อความแชท/โน้ตจากลูกค้าตรงนี้", height=140, placeholder="เช่น: คุณสมชาย 081-234-5678 สนใจทำป้ายร้าน 5,000 บาท ขอนัดตามผลวันพรุ่งนี้")
     
-    submitted = st.form_submit_button("💾 บันทึกข้อมูลลง Google Sheets")
-    
-    if submitted:
-        if customer_name.strip() == "":
-            st.sidebar.error("กรุณากรอกชื่อลูกค้าครับ!")
+    if st.button("⚡ ให้ AI Agent ประมวลผลและบันทึก", use_container_width=True):
+        if not chat_input.strip():
+            st.sidebar.warning("กรุณากรอกหรือวางข้อความแชทก่อนครับ!")
+        elif not GEMINI_API_KEY:
+            st.sidebar.error("⚠️ ไม่พบ GEMINI_API_KEY ใน st.secrets กรุณาตั้งค่า GEMINI_API_KEY ก่อนครับ")
         else:
-            # สร้างรหัสงานให้อัตโนมัติ (เช่น JOB-001, JOB-002)
-            new_id = f"JOB-{len(df) + 1:03d}"
-            
-            # เตรียมแพ็กเกจข้อมูลส่งหา Webhook
-            payload = {
-                "action": "create",
-                "job_id": new_id,
-                "customer_name": customer_name,
-                "phone": phone,
-                "job_type": job_type,
-                "price": price,
-                "status": status,
-                "follow_date": follow_date.strftime("%Y-%m-%d")
-            }
-            
-            # ยิงข้อมูลไปหา Google Apps Script
-            with st.spinner("กำลังบันทึกลง Google Sheets..."):
+            with st.spinner("🤖 AI Agent กำลังประมวลผล..."):
                 try:
-                    response = requests.post(WEBHOOK_URL, json=payload, timeout=10)
-                    if response.status_code == 200:
-                        st.sidebar.success(f"บันทึกรหัส {new_id} เรียบร้อยแล้ว!")
-                        st.cache_data.clear()  # ล้างแคชเพื่อให้ตารางอัปเดตข้อมูลใหม่ทันที
-                        st.rerun()
-                    else:
-                        st.sidebar.error("เกิดข้อผิดพลาดในการบันทึก กรุณาเช็กการตั้งค่า Webhook")
+                    client = genai.Client(api_key=GEMINI_API_KEY)
+                    today_str = date.today().strftime("%Y-%m-%d")
+                    prompt = f"""
+คุณคือ AI Agent ผู้ช่วยบันทึกข้อมูลลูกค้าและงานสำหรับร้านค้า
+
+โปรดอ่านข้อความแชท/โน้ตต่อไปนี้ แล้วสกัดข้อมูลออกมาเป็น JSON Object ในรูปแบบโครงสร้างนี้:
+{{
+  "customer_name": "ชื่อลูกค้า หรือ ชื่อร้าน (หากไม่พบให้ระบุ 'ลูกค้าทั่วไป')",
+  "phone": "เบอร์โทรศัพท์ หรือ LINE ID (หากไม่พบให้ใส่ '-')",
+  "job_type": "เลือก 1 รายการจากตัวเลือกประเภทงานนี้เท่านั้น: {json.dumps(job_type_list, ensure_ascii=False)}",
+  "price": 0,
+  "status": "⏳ รอเสนอราคา",
+  "follow_date": "YYYY-MM-DD"
+}}
+
+เงื่อนไขสำคัญ:
+1. job_type จะต้องเลือกให้ตรงกับรายการในลิสต์ {json.dumps(job_type_list, ensure_ascii=False)} ให้ดีที่สุด
+2. price ให้ระบุเป็นตัวเลขจำนวนเต็ม (integer) หากไม่ทราบระบุ 0
+3. status ให้ใส่ "⏳ รอเสนอราคา" หากไม่ระบุเป็นอย่างอื่น
+4. follow_date ให้แปลงเป็นรูปแบบ YYYY-MM-DD หากไม่ระบุให้ใช้วันนี้ ({today_str})
+
+ข้อความแชท/โน้ตจากลูกค้า:
+\"\"\"
+{chat_input}
+\"\"\"
+
+ส่งคืนเฉพาะผลลัพธ์ JSON เท่านั้น ไม่มีข้อความอื่นปน
+"""
+                    response = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json"
+                        )
+                    )
+                    
+                    extracted = json.loads(response.text)
+                    new_id = f"JOB-{len(df) + 1:03d}"
+                    
+                    ai_payload = {
+                        "action": "create",
+                        "job_id": new_id,
+                        "customer_name": str(extracted.get("customer_name", "ลูกค้าทั่วไป")),
+                        "phone": str(extracted.get("phone", "-")),
+                        "job_type": str(extracted.get("job_type", job_type_list[0])),
+                        "price": int(extracted.get("price", 0)),
+                        "status": str(extracted.get("status", "⏳ รอเสนอราคา")),
+                        "follow_date": str(extracted.get("follow_date", today_str))
+                    }
+                    
+                    with st.spinner("กำลังบันทึกลง Google Sheets..."):
+                        resp = requests.post(WEBHOOK_URL, json=ai_payload, timeout=10)
+                        if resp.status_code == 200:
+                            st.sidebar.success(f"🤖 AI Agent บันทึกรหัส {new_id} เรียบร้อยแล้ว!")
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.sidebar.error("เกิดข้อผิดพลาดในการบันทึก Webhook")
                 except Exception as ex:
-                    st.sidebar.error(f"การเชื่อมต่อผิดพลาด: {ex}")
+                    st.sidebar.error(f"เกิดข้อผิดพลาด AI: {ex}")
 
 # ---------------------------------------------------------
 # 5. สรุปผลตัวเลขสำคัญเชิงธุรกิจ (KPI Dashboard Metrics)
