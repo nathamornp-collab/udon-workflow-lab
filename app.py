@@ -6,6 +6,7 @@ import os
 from datetime import datetime, date
 from google import genai
 from google.genai import types
+from streamlit_mic_recorder import mic_recorder
 
 # ---------------------------------------------------------
 # 1. ตั้งค่าหน้าตาของเว็บแอปพลิเคชัน
@@ -32,9 +33,9 @@ except Exception:
 
 # ดึง GEMINI_API_KEY จาก st.secrets หรือ os.environ
 try:
-    GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+    GEMINI_API_KEY = str(st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))).strip()
 except Exception:
-    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+    GEMINI_API_KEY = str(os.environ.get("GEMINI_API_KEY", "")).strip()
 
 # Custom CSS สำหรับ Mobile-friendly UX และ Job Cards
 st.markdown("""
@@ -93,14 +94,25 @@ st.subheader("Udon Workflow Lab — อ่าน & บันทึกข้อ�
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 4. เมนูด้านข้าง: ฟอร์มบันทึกงานใหม่ลง Google Sheets (รองรับ AI Agent)
+# 4. เมนูด้านข้าง: ฟอร์มบันทึกงานใหม่ลง Google Sheets (รองรับ AI Agent & Voice)
 # ---------------------------------------------------------
 st.sidebar.header("➕ บันทึกลูกค้า/งานใหม่")
 
-tab_manual, tab_ai = st.sidebar.tabs(["📝 กรอกเอง", "🤖 AI Agent สกัดแชท"])
+entry_mode = st.sidebar.radio(
+    "📌 เลือกวิธีบันทึกข้อมูล:",
+    ["📝 กรอกแบบฟอร์มเอง", "🤖 AI สกัดจากข้อความแชท", "🎙️ AI บันทึกด้วยเสียง (Voice Agent)"],
+    index=0
+)
 
-with tab_manual:
-    with st.form("new_job_form", clear_on_submit=True):
+st.sidebar.markdown("---")
+
+if not GEMINI_API_KEY:
+    user_key_input = st.sidebar.text_input("🔑 ตั้งค่า GEMINI_API_KEY:", type="password", placeholder="วาง API Key ที่นี่...")
+    if user_key_input.strip():
+        GEMINI_API_KEY = user_key_input.strip()
+
+if entry_mode == "📝 กรอกแบบฟอร์มเอง":
+    with st.sidebar.form("new_job_form", clear_on_submit=True):
         customer_name = st.text_input("ชื่อลูกค้า / ชื่อร้าน")
         phone = st.text_input("เบอร์โทรศัพท์ / LINE ID")
         job_type = st.selectbox("ประเภทงาน", job_type_list)
@@ -142,11 +154,11 @@ with tab_manual:
                     except Exception as ex:
                         st.sidebar.error(f"การเชื่อมต่อผิดพลาด: {ex}")
 
-with tab_ai:
-    st.write("วางข้อความแชทจาก LINE/Facebook ให้ AI สกัดข้อมูลและบันทึกอัตโนมัติ")
-    chat_input = st.text_area("วางข้อความแชท/โน้ตจากลูกค้าตรงนี้", height=140, placeholder="เช่น: คุณสมชาย 081-234-5678 สนใจทำป้ายร้าน 5,000 บาท ขอนัดตามผลวันพรุ่งนี้")
+elif entry_mode == "🤖 AI สกัดจากข้อความแชท":
+    st.sidebar.write("วางข้อความแชทจาก LINE/Facebook ให้ AI สกัดข้อมูลและบันทึกอัตโนมัติ")
+    chat_input = st.sidebar.text_area("วางข้อความแชท/โน้ตจากลูกค้าตรงนี้", height=140, placeholder="เช่น: คุณสมชาย 081-234-5678 สนใจทำป้ายร้าน 5,000 บาท ขอนัดตามผลวันพรุ่งนี้")
     
-    if st.button("⚡ ให้ AI Agent ประมวลผลและบันทึก", use_container_width=True):
+    if st.sidebar.button("⚡ ให้ AI Agent ประมวลผลและบันทึก", use_container_width=True):
         if not chat_input.strip():
             st.sidebar.warning("กรุณากรอกหรือวางข้อความแชทก่อนครับ!")
         elif not GEMINI_API_KEY:
@@ -183,7 +195,7 @@ with tab_ai:
 ส่งคืนเฉพาะผลลัพธ์ JSON เท่านั้น ไม่มีข้อความอื่นปน
 """
                     response = client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-flash-latest',
                         contents=prompt,
                         config=types.GenerateContentConfig(
                             response_mime_type="application/json"
@@ -214,6 +226,124 @@ with tab_ai:
                             st.sidebar.error("เกิดข้อผิดพลาดในการบันทึก Webhook")
                 except Exception as ex:
                     st.sidebar.error(f"เกิดข้อผิดพลาด AI: {ex}")
+
+elif entry_mode == "🎙️ AI บันทึกด้วยเสียง (Voice Agent)":
+    st.sidebar.write("🎙️ **บันทึกด้วยเสียง:** กดปุ่มไมโครโฟนเพื่ออัดเสียง หรือแนบไฟล์เสียง")
+    st.sidebar.caption("💡 หากเข้าผ่าน http://localhost:8501 อนุญาตสิทธิ์ไมโครโฟนในเบราว์เซอร์ก่อนใช้งาน")
+    
+    # 1. Native Streamlit Audio Input
+    audio_val = st.sidebar.audio_input("อัดเสียงสั่งงานผ่านไมโครโฟน", key="sidebar_mic_input")
+    
+    # 2. ตัวเลือกอัปโหลดไฟล์เสียง (ทำงานได้ 100% ทุกอุปกรณ์)
+    audio_file = st.sidebar.file_uploader("หรือเลือก/แนบไฟล์เสียง (WAV, MP3, M4A, OGG)", type=["wav", "mp3", "m4a", "ogg", "webm", "aac"], key="sidebar_audio_file")
+    
+    audio_bytes = None
+    mime_type = "audio/wav"
+    raw_type = ""
+    
+    if audio_val is not None:
+        try:
+            audio_bytes = audio_val.getvalue()
+            raw_type = getattr(audio_val, "type", "audio/wav") or "audio/wav"
+        except Exception:
+            audio_bytes = None
+    elif audio_file is not None:
+        try:
+            audio_bytes = audio_file.getvalue()
+            raw_type = getattr(audio_file, "type", "audio/wav") or "audio/wav"
+        except Exception:
+            audio_bytes = None
+            
+    if raw_type:
+        raw_lower = str(raw_type).lower()
+        if "webm" in raw_lower:
+            mime_type = "audio/webm"
+        elif "ogg" in raw_lower:
+            mime_type = "audio/ogg"
+        elif "mp3" in raw_lower or "mpeg" in raw_lower:
+            mime_type = "audio/mp3"
+        elif "m4a" in raw_lower or "mp4" in raw_lower:
+            mime_type = "audio/m4a"
+        else:
+            mime_type = "audio/wav"
+        
+    if audio_bytes and len(audio_bytes) > 0:
+        st.sidebar.audio(audio_bytes, format=mime_type)
+        
+        if st.sidebar.button("⚡ ให้ AI ถอดความเสียงและบันทึก", key="btn_voice_process", use_container_width=True):
+            if not GEMINI_API_KEY:
+                st.sidebar.error("⚠️ ไม่พบ GEMINI_API_KEY ใน st.secrets กรุณาตั้งค่าก่อนครับ")
+            else:
+                with st.spinner("🎙️ Voice AI กำลังฟังเสียง ถอดความ และสกัดข้อมูล..."):
+                    try:
+                        client = genai.Client(api_key=GEMINI_API_KEY)
+                        today_str = date.today().strftime("%Y-%m-%d")
+                        
+                        audio_part = types.Part.from_bytes(
+                            data=audio_bytes,
+                            mime_type=mime_type
+                        )
+                        
+                        voice_prompt = f"""
+คุณคือ Voice AI Agent ผู้ช่วยฟังเสียงสั่งงานจากผู้ใช้เพื่อบันทึกข้อมูลลูกค้าและงานสำหรับร้านค้า
+
+โปรดฟังไฟล์เสียง ถอดความเสียงพูด (Transcribe) และสกัดข้อมูลออกมาเป็น JSON Object ในรูปแบบโครงสร้างนี้:
+{{
+  "transcription": "ข้อความคำพูดทั้งหมดที่ฟังและถอดความได้จากเสียงพูด",
+  "customer_name": "ชื่อลูกค้า หรือ ชื่อร้าน (หากไม่พบให้ระบุ 'ลูกค้าทั่วไป')",
+  "phone": "เบอร์โทรศัพท์ หรือ LINE ID (หากฟังเบอร์โทรศัพท์เป็นคำพูดภาษาไทย เช่น 'ศูนย์-แปด-หนึ่ง...' ให้แปลงเป็นตัวเลขสตรีม '081...' หากไม่พบให้ใส่ '-')",
+  "job_type": "เลือก 1 รายการจากตัวเลือกประเภทงานนี้เท่านั้น: {json.dumps(job_type_list, ensure_ascii=False)}",
+  "price": 0,
+  "status": "⏳ รอเสนอราคา",
+  "follow_date": "YYYY-MM-DD"
+}}
+
+เงื่อนไขสำคัญ:
+1. job_type จะต้องเลือกให้ตรงกับรายการในลิสต์ {json.dumps(job_type_list, ensure_ascii=False)} ให้ดีที่สุด
+2. หากฟังเบอร์โทรศัพท์เป็นคำพูดภาษาไทย เช่น "ศูนย์ แปด หนึ่ง สาม สี่..." ให้แปลงคำพูดตัวเลขเหล่านั้นเป็นตัวเลขสตรีม "08134..."
+3. price ให้ระบุเป็นตัวเลขจำนวนเต็ม (integer) หากไม่ทราบระบุ 0
+4. status หากไม่ระบุให้ใส่ "⏳ รอเสนอราคา"
+5. follow_date ถ้าระบุวัน ให้แปลงเป็นรูปแบบ YYYY-MM-DD หากไม่ระบุให้ใช้วันนี้ ({today_str})
+
+ส่งคืนเฉพาะผลลัพธ์ JSON เท่านั้น ไม่มีข้อความอื่นปน
+"""
+                        response = client.models.generate_content(
+                            model='gemini-flash-latest',
+                            contents=[audio_part, voice_prompt],
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json"
+                            )
+                        )
+                        
+                        extracted = json.loads(response.text)
+                        
+                        transcription_text = extracted.get("transcription", "")
+                        if transcription_text:
+                            st.sidebar.info(f"🗣️ **ข้อความที่ AI ฟังได้:**\n\"{transcription_text}\"")
+                        
+                        new_id = f"JOB-{len(df) + 1:03d}"
+                        
+                        voice_payload = {
+                            "action": "create",
+                            "job_id": new_id,
+                            "customer_name": str(extracted.get("customer_name", "ลูกค้าทั่วไป")),
+                            "phone": str(extracted.get("phone", "-")),
+                            "job_type": str(extracted.get("job_type", job_type_list[0])),
+                            "price": int(extracted.get("price", 0)),
+                            "status": str(extracted.get("status", "⏳ รอเสนอราคา")),
+                            "follow_date": str(extracted.get("follow_date", today_str))
+                        }
+                        
+                        with st.spinner("กำลังบันทึกลง Google Sheets..."):
+                            resp = requests.post(WEBHOOK_URL, json=voice_payload, timeout=10)
+                            if resp.status_code == 200:
+                                st.sidebar.success(f"🎉 บันทึกงานรหัส {new_id} จากเสียงเรียบร้อย!")
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.sidebar.error("เกิดข้อผิดพลาดในการบันทึก Webhook")
+                    except Exception as ex:
+                        st.sidebar.error(f"เกิดข้อผิดพลาด Voice AI: {ex}")
 
 # ---------------------------------------------------------
 # 5. สรุปผลตัวเลขสำคัญเชิงธุรกิจ (KPI Dashboard Metrics)
